@@ -4,21 +4,28 @@
 
 A background job queue in Go, built on Redis Streams.
 
-My first version used a plain Redis list (`RPUSH` / `BLPOP`). It worked, but `BLPOP` removes a job the moment a worker reads it, so a worker crash in the middle of a job lost that job for good. I had that written down as a known limitation, and this version is my fix for it. Jobs now stay in Redis until a worker confirms they're done, failures are retried with backoff, and jobs that keep failing end up in a dead-letter queue you can replay.
+The system uses Redis Streams and consumer groups to provide acknowledgement-based processing. Jobs remain recoverable until acknowledged, failures are retried with backoff, and jobs that exceed their attempt limit are routed to a replayable dead-letter queue.
 
 ![Dashboard](docs/dashboard.png)
 
-## Try it
+## Quick start
 
 ```bash
 docker compose up --build
 ```
 
-Open http://localhost:8080, pick "Flaky task" and click "Queue 20". You'll see jobs fail, wait, retry, and the unlucky ones land in the dead-letter panel, where you can replay them.
+The producer dashboard is available at [http://localhost:8080](http://localhost:8080). It exposes queue statistics, job submission, retry activity, and dead-letter replay.
 
-To see crash recovery, queue some jobs, run `docker compose kill -s SIGKILL worker`, then `docker compose start worker`. The jobs that were in flight get picked up again and finish. You can also run several worker processes with `docker compose up --build --scale worker=3`.
+The Compose stack also supports crash-recovery validation:
 
-Without Docker you need Redis 6.2 or newer:
+```bash
+docker compose kill -s SIGKILL worker
+docker compose start worker
+```
+
+Jobs left pending by the terminated worker are reclaimed after `JOB_TIMEOUT`. Multiple worker processes can be started with `docker compose up --build --scale worker=3`.
+
+For local Go execution, Redis 6.2 or newer is required:
 
 ```bash
 cp .env.example .env
@@ -29,19 +36,51 @@ go run ./cmd/producer   # terminal 2
 ## How it works
 
 ```mermaid
-flowchart LR
-    C[Client] -->|POST /jobs| P[Producer API]
-    P -->|XADD| S[(Redis Stream<br/>wq:jobs)]
-    S -->|XREADGROUP| W[Worker pool<br/>N goroutines]
-    W -->|success: XACK| D[COMPLETED]
-    W -->|failure, attempts left| R[(Retry ZSET<br/>score = run-at)]
+flowchart TB
+    C[Client]
+    P[Producer API<br/><small>validates and returns 202</small>]
+
+    subgraph QUEUE["Durable queue"]
+        direction LR
+        S[(Redis Stream<br/><b>wq:jobs</b>)]
+        R[(Retry ZSET<br/><small>score = run-at</small>)]
+        DLQ[(Dead-letter stream)]
+    end
+
+    subgraph PROCESSING["Processing"]
+        direction LR
+        W[Worker pool<br/><small>N goroutines</small>]
+        D([COMPLETED])
+    end
+
+    C -->|POST /jobs| P
+    P -->|XADD| S
+    S -->|XREADGROUP| W
+    W -->|success: XACK| D
+    W -->|failure, attempts left| R
     R -->|due: Lua script moves it back| S
-    W -->|out of attempts| DLQ[(Dead-letter stream)]
+    W -->|out of attempts| DLQ
     DLQ -->|POST /dlq/id/replay| S
     S -.->|un-acked too long: XAUTOCLAIM| W
+
+    classDef client fill:#E8F1FF,stroke:#4B78B8,stroke-width:1.5px,color:#17365D
+    classDef api fill:#E7F6EE,stroke:#3A9468,stroke-width:1.5px,color:#174D35
+    classDef queue fill:#FFF3D6,stroke:#C58A24,stroke-width:1.5px,color:#63430B
+    classDef worker fill:#F0E9FF,stroke:#8061B5,stroke-width:1.5px,color:#39245F
+    classDef success fill:#DDF5E8,stroke:#3A9468,stroke-width:1.5px,color:#174D35
+    classDef failure fill:#FFE6E3,stroke:#C95A50,stroke-width:1.5px,color:#6A211B
+
+    class C client
+    class P api
+    class S,R queue
+    class W worker
+    class D success
+    class DLQ failure
 ```
 
-The producer validates a request, adds the job to the stream and answers `202` with a job ID. A pool of goroutines in the worker process reads from a consumer group. A worker only acknowledges (`XACK`) a job after its handler succeeds. What happens otherwise:
+The producer validates requests, writes jobs to the stream, and returns `202` with a job ID. Workers read through a consumer group and acknowledge (`XACK`) a job only after its handler succeeds.
+
+Failure handling:
 
 | Situation | Result |
 |---|---|
@@ -53,11 +92,11 @@ The producer validates a request, adds the job to the stream and answers `202` w
 | SIGTERM | Stops reading, finishes running jobs, then exits |
 | Redis down | Workers back off instead of spinning, the API returns `503` |
 
-Delivery is at-least-once. If a worker finishes a job and dies before the ack, the job runs again, so handlers need to be safe to run twice. More detail on the Redis keys and each failure path is in [ARCHITECTURE.md](ARCHITECTURE.md).
+Delivery is at-least-once. A worker that finishes a job but exits before acknowledging it can cause the job to run again; handlers must therefore tolerate duplicate execution. Redis keys and failure-path details are documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Benchmarks
 
-`go run ./cmd/bench` starts a real worker pool, enqueues jobs from 8 concurrent producers and measures how long each job takes from enqueue to acknowledged. CI runs it on every push. This is the table from one run on a GitHub Actions runner, with 2,000 jobs that each simulate 10 ms of work:
+The benchmark starts a real worker pool, enqueues jobs from eight concurrent producers, and measures enqueue-to-acknowledgement latency. CI runs it on every push. The following run used 2,000 jobs with 10 ms of simulated work on a GitHub Actions runner:
 
 | Workers | Throughput | p50 latency | p99 latency |
 |--------:|-----------:|------------:|------------:|
@@ -65,7 +104,7 @@ Delivery is at-least-once. If a worker finishes a job and dies before the ack, t
 | 5  | 446 jobs/s   | 2.2 s  | 4.3 s  |
 | 20 | 1,740 jobs/s | 531 ms | 1.0 s  |
 
-Throughput grows almost in step with worker count, which is what you'd expect while the work is I/O-bound. The latencies are large because all jobs are enqueued in one burst, so most of the time is spent waiting in the backlog. With a no-op handler, the queue itself topped out around 12,000 jobs/s on a 2-core machine with Redis running alongside.
+Throughput scales approximately with worker count for this I/O-bound workload. Latency reflects burst backlog time rather than handler duration. A no-op handler reached approximately 12,000 jobs/s on a 2-core machine with Redis running locally.
 
 ## API
 
@@ -84,9 +123,9 @@ curl -X POST localhost:8080/jobs \
 # {"job_id":"9f2c...","status":"PENDING","status_url":"/jobs/9f2c...","task_type":"send_email"}
 ```
 
-Task types are `send_email`, `resize_image`, `generate_pdf` and `flaky_task` (fails at a rate you choose, for watching retries). The handlers only simulate work with sleeps, since the project is about the queue and not about sending real email. Settings such as `WORKER_COUNT`, `MAX_ATTEMPTS`, `JOB_TIMEOUT` and the retry delays are environment variables, listed in [.env.example](.env.example).
+Task types are `send_email`, `resize_image`, `generate_pdf`, and `flaky_task`. Handlers simulate work because the project focuses on queue reliability rather than external task integrations. `WORKER_COUNT`, `MAX_ATTEMPTS`, `JOB_TIMEOUT`, and retry delays are configured through environment variables listed in [.env.example](.env.example).
 
-## Decisions worth explaining
+## Design decisions
 
 - Streams instead of a list: a consumer group keeps each message in a pending list until it's acked, which is what makes crash recovery possible.
 - Retries wait in a sorted set scored by run-at time, because streams can't delay delivery. A small Lua script moves due jobs back, so two workers can never promote the same one.
