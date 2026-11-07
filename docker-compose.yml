@@ -1,0 +1,46 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    # Exposed only on this machine for local debugging (redis-cli). Remove in production.
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  producer:
+    build: .
+    command: ["/app/workqueue-producer"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PORT_PRODUCER: 8080
+      MAX_ATTEMPTS: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  worker:
+    build: .
+    command: ["/app/workqueue-worker"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PORT_WORKER: 8081
+      WORKER_COUNT: 5
+      JOB_TIMEOUT: 30s
+      RETRY_BASE_DELAY: 1s
+      RETRY_MAX_DELAY: 1m
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Scale with: docker compose up --scale worker=3
+    # (metrics port is not published so replicas don't clash; use the producer's /stats)
+
+volumes:
+  redis_data:

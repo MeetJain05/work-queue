@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="WorkQueue: a Redis Streams job queue in Go" />
+    <title>WorkQueue</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark">WQ</span><span><strong>WorkQueue</strong><small>Redis Streams job queue in Go</small></span></a>
+      <span class="service-status"><i></i> <span id="service-text">Connecting…</span></span>
+    </header>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">At-least-once background jobs</p>
+          <h1>Move slow work<br /><span>off the request path.</span></h1>
+          <p class="hero-copy">The producer returns a job ID right away. Workers read from a Redis Stream consumer group, acknowledge only after the work succeeds, retry failures with exponential backoff, and move jobs that keep failing to a dead-letter queue.</p>
+        </div>
+        <div class="flow-card" aria-label="System flow">
+          <div class="flow-node"><b>01</b><span>Producer API</span><small>POST /jobs</small></div><div class="flow-line"></div>
+          <div class="flow-node active"><b>02</b><span>Redis Stream</span><small>consumer group</small></div><div class="flow-line"></div>
+          <div class="flow-node"><b>03</b><span>Worker pool</span><small id="flow-workers">goroutines</small></div>
+        </div>
+      </section>
+
+      <section class="metrics-grid" aria-label="Live queue metrics">
+        <article class="metric-card queue"><span class="metric-label">Queued</span><strong id="m-queued">—</strong><span class="metric-hint">Waiting for a worker</span></article>
+        <article class="metric-card inflight"><span class="metric-label">In flight</span><strong id="m-inflight">—</strong><span class="metric-hint">Delivered, not yet acked</span></article>
+        <article class="metric-card retrying"><span class="metric-label">Retrying</span><strong id="m-retrying">—</strong><span class="metric-hint">Waiting on backoff</span></article>
+        <article class="metric-card completed"><span class="metric-label">Completed</span><strong id="m-completed">—</strong><span class="metric-hint">Acked successfully</span></article>
+        <article class="metric-card failed"><span class="metric-label">Dead letter</span><strong id="m-dead">—</strong><span class="metric-hint">Out of attempts</span></article>
+        <article class="metric-card workers"><span class="metric-label">Workers</span><strong id="m-workers">—</strong><span class="metric-hint">Live goroutines</span></article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel submit-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Try it</p><h2>Submit a background job</h2></div><span class="live-dot">LIVE</span></div>
+          <form id="job-form">
+            <label for="task-type">Task type</label>
+            <select id="task-type" name="task_type">
+              <option value="send_email">Send email</option>
+              <option value="resize_image">Resize image</option>
+              <option value="generate_pdf">Generate PDF</option>
+              <option value="flaky_task">Flaky task (shows retries and the DLQ)</option>
+            </select>
+            <div id="fields-send_email" class="task-fields"><label for="to">Recipient</label><input id="to" type="email" value="someone@example.com" /><label for="subject">Subject</label><input id="subject" type="text" value="Your report is ready" /></div>
+            <div id="fields-resize_image" class="task-fields hidden"><label for="width">Width</label><input id="width" type="number" value="800" /><label for="height">Height</label><input id="height" type="number" value="600" /></div>
+            <div id="fields-flaky_task" class="task-fields hidden"><label for="fail-rate">Failure rate <span id="fail-rate-out">70%</span></label><input id="fail-rate" type="range" min="0" max="1" step="0.1" value="0.7" /></div>
+            <div class="button-row">
+              <button type="submit"><span>Queue job</span><b>→</b></button>
+              <button type="button" id="burst" class="secondary"><span>Queue 20</span><b>⇉</b></button>
+            </div>
+            <p id="form-message" class="form-message" role="status"></p>
+          </form>
+        </article>
+
+        <article class="panel lifecycle-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Job lifecycle</p><h2>What happens next?</h2></div></div>
+          <div class="lifecycle">
+            <div class="life-step"><span>1</span><div><strong>PENDING</strong><small>XADD to the stream and a status record saved</small></div></div>
+            <div class="life-step"><span>2</span><div><strong>PROCESSING</strong><small>XREADGROUP delivers it to one worker</small></div></div>
+            <div class="life-step ok"><span>3</span><div><strong>COMPLETED</strong><small>XACK only after the handler succeeds</small></div></div>
+            <div class="life-step warn"><span>↻</span><div><strong>RETRYING</strong><small>Waits base × 2ⁿ (with jitter) in a sorted set</small></div></div>
+            <div class="life-step bad"><span>✕</span><div><strong>FAILED</strong><small>Out of attempts, moved to the dead-letter queue</small></div></div>
+          </div>
+          <p class="note">If a worker crashes before XACK, another worker reclaims the job with XAUTOCLAIM.</p>
+        </article>
+      </section>
+
+      <section class="content-grid lower">
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">GET /jobs/{id}</p><h2>Your recent jobs</h2></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Attempts</th></tr></thead>
+              <tbody id="jobs-body"><tr class="empty"><td colspan="4">Submit a job to watch it move through its states.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">GET /dlq</p><h2>Dead-letter queue</h2></div></div>
+          <ul id="dlq-list" class="dlq-list"><li class="empty">No dead letters. Submit a flaky task to see one land here.</li></ul>
+        </article>
+      </section>
+
+      <footer><span>WorkQueue · Go · Redis Streams · Docker</span><a href="/stats" target="_blank" rel="noreferrer">Raw stats JSON ↗</a></footer>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
