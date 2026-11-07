@@ -1,6 +1,6 @@
 # WorkQueue
 
-![CI](https://github.com/<your-github-username>/WorkQueue/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/MeetJain05/WorkQueue/actions/workflows/ci.yml/badge.svg)
 
 A background job queue in Go built on **Redis Streams**. An HTTP producer accepts jobs and returns immediately; a pool of workers processes them with **at-least-once delivery**, **exponential-backoff retries**, a **dead-letter queue**, and **crash recovery**.
 
