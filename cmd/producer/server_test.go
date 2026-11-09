@@ -14,6 +14,8 @@ import (
 	"WorkQueue/internal/queue"
 	"WorkQueue/internal/task"
 	"WorkQueue/internal/testredis"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *queue.Queue) {
@@ -133,5 +135,54 @@ func TestStatsAndReplayUnknown(t *testing.T) {
 	r, _ := post(t, ts.URL+"/dlq/0-1/replay", "")
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("replaying a missing dead letter should 404, got %d", r.StatusCode)
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	ts, _ := newTestServer(t)
+	res, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected healthy Redis to return 200, got %d", res.StatusCode)
+	}
+}
+
+func TestHealthzWhenRedisIsUnavailable(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = rdb.Close() })
+	s := &server{
+		q:   queue.New(rdb, "unavailable-health-test"),
+		reg: handlers.Default(),
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	ts := httptest.NewServer(s.routes(nil))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected unavailable Redis to return 503, got %d", res.StatusCode)
+	}
+}
+
+func TestProducerPortPrefersRenderPort(t *testing.T) {
+	t.Setenv("PORT_PRODUCER", "8081")
+	t.Setenv("PORT", "10000")
+	if got := producerPort(); got != "10000" {
+		t.Fatalf("producerPort() = %q, want 10000", got)
+	}
+}
+
+func TestProducerPortFallsBackToProducerPort(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("PORT_PRODUCER", "8081")
+	if got := producerPort(); got != "8081" {
+		t.Fatalf("producerPort() = %q, want 8081", got)
 	}
 }

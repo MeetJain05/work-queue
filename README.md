@@ -33,6 +33,8 @@ go run ./cmd/worker     # terminal 1
 go run ./cmd/producer   # terminal 2
 ```
 
+The producer executable can also initialize the worker pool in the same process, which supports single-service deployments. Docker Compose intentionally keeps the producer and worker executables separate so local scaling and crash-recovery behavior remain easy to exercise.
+
 ## How it works
 
 ```mermaid

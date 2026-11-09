@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: work-queue
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: work-queue-redis
+          property: connectionString
+      - key: WORKER_COUNT
+        value: "2"
+      - key: MAX_ATTEMPTS
+        value: "3"
+      - key: JOB_TIMEOUT
+        value: 30s
+      - key: RETRY_BASE_DELAY
+        value: 1s
+      - key: RETRY_MAX_DELAY
+        value: 1m
+
+  - type: keyvalue
+    name: work-queue-redis
+    plan: free
