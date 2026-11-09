@@ -25,6 +25,4 @@ services:
   - type: keyvalue
     name: work-queue-redis
     plan: free
-    ipAllowList:
-      - source: 0.0.0.0/0
-        description: Allow Render Web Service connections
+    ipAllowList: []
